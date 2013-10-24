@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 
 namespace ObjectInitializer
 {
+    // Innocuous Change
 	public class Program
 	{
 		public enum Color { Red, Green, Blue, Yellow, Fidget } ;

@@ -1,110 +1,92 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text;
 
-using profdata.WF.Enumerations;
-
-namespace profdata.WF.Services.Handlers
+namespace ObjectLiteral
 {
+	public class Restriction
+	{
+		public string EntityName { get; set; }
+		public HashSet<string> IncludeProperties { get; set; }
+		public string AlternateKeyName { get; set; } // TODO: Implement
+
+		public Restriction(string entityName, params string[] includeProperties)
+		{
+			EntityName = entityName;
+			IncludeProperties = new HashSet<string>(includeProperties);
+			AlternateKeyName = null;
+		}
+
+		public Restriction( string entityName, string alternateKeyName, params string[] includeProperties)
+			:this(entityName, includeProperties )
+		{
+			AlternateKeyName = alternateKeyName;
+		}
+	}
+
+
 	public static class ObjectToObjectLiteral
 	{
 		public static string NewLine = Environment.NewLine;
 		public static string KeyProperty = "Key";
+		private enum ListType { Unknown, Intrinsic, Class } ;
 
 		public class Entity
 		{
 			public Type Type { get; set; }
 			public long Key { get; set; }
+			public string Path { get; set; }
 
-			public Entity(object obj)
+			public Entity(object obj, string path)
 			{
 				Type = obj.GetType();
 				var keyProperty = Type.GetProperty(ObjectToObjectLiteral.KeyProperty);
 				Key = (keyProperty == null)
 					? 0
 					: Convert.ToInt64(keyProperty.GetValue(obj));
+				Path = (path.Length == 0)
+					? UniqueName
+					: path;
+			}
+
+			public string UniqueName
+			{
+				get { return string.Format("{0}{1}", Type.Name, Key); }
 			}
 		}
 
+		/// <summary>
+		/// Compare Entities on Type and Key only
+		/// </summary>
 		public class EntityEqualityComparer : IEqualityComparer<Entity>
 		{
 			public bool Equals( Entity lhs, Entity rhs )
 			{
-				if ( lhs.Type != rhs.Type )
+				if (lhs == null && rhs == null)
+					return true;
+
+				if (lhs == null || rhs == null)
 					return false;
 
-				return lhs.Key == rhs.Key;
+				return lhs.Type == rhs.Type && lhs.Key == rhs.Key;
 			}
 
 			public int GetHashCode( Entity entity)
 			{
-				return entity.Type.GetHashCode() + entity.Key.GetHashCode();
+				return ( entity == null )
+					? 0
+					: entity.Type.GetHashCode() + entity.Key.GetHashCode();
 			}
-		}
-
-#if false
-		public class ObjectEqualityComparer : IEqualityComparer<Object>
-		{
-			new public bool Equals(object lhs, object rhs)
-			{
-				return ReferenceEquals(lhs, rhs);
-			}
-
-			public int GetHashCode(object obj)
-			{
-				return obj.GetHashCode();
-			}
-		}
-#endif
-
-		public class Restriction
-		{
-			public string EntityName { get; set; }
-			public HashSet<string> IncludeProperties { get; set; }
-
-			public Restriction(string entityName, params string[] includeProperties)
-			{
-				EntityName = entityName;
-				IncludeProperties = new HashSet<string>( includeProperties );
-			}
-		}
-
-
-		public static string GetSampleGlobalExcludesProperties()
-		{
-			return "IsPersistent,Timestamp,ImportBatch";
-		}
-
-
-		public static Restriction[] GetSampleCommonRestrictions()
-		{
-			return new Restriction[]
-			{
-				new Restriction( "ShoppingCart", new string[] {"Key"}),
-				new Restriction
-				( 
-					"Product", 
-					new string[] 
-					{
-						"Key",
-						"Code",
-						"Description",
-						"IsPaid"
-					}
-				)
-			};
 		}
 
 		/// <summary>
 		/// Convert NHibernate .NET object graph to C# Object Literal Contructor
-		/// 
 		/// </summary>
 		/// <param name="obj">Object graph to serialize to C# Object Literal Constructor</param>
-		/// <param name="excludeProperties">Properties to globally exculde</param>
+		/// <param name="globalExcludeProperties">Properties to globally exculde</param>
 		/// <param name="entityRestrictions">Entities to serialize as a limited set of properties, useful to limit depth of traversal</param>
 		/// <returns>string containing Object Literal Constructor</returns>
 		public static string ToObjectInitializer
@@ -119,10 +101,12 @@ namespace profdata.WF.Services.Handlers
 			// Maintain a list of each entity encountered.  This is used to
 			// prevent "parent" or duplicate references from causing an
 			// infinite loop.  If the entity is a parent relationship, NHibernate
-			// will have the same reference on both objects, but it if it simply
+			// will have the same reference on both objects, but if it is simply
 			// a second reference it will have a different reference
-			var hist = new HashSet<Entity>();
-			var comparer = new EntityEqualityComparer();
+			var entityMap = new Dictionary<Entity, Entity>
+			(
+				new EntityEqualityComparer()
+			);
 
 			// Place Entity Names with Property limitations in a dictionary
 			// with a HashSet of Properties to include as the value
@@ -130,16 +114,20 @@ namespace profdata.WF.Services.Handlers
 				.ToDictionary(k => k.EntityName, v => v.IncludeProperties);
 
 			// Place properties to globally exclude in a HashSet
-			string [] excludeProperties = globalExcludeProperties.Split(','); 
-			HashSet<string> exclude = new HashSet<string>(excludeProperties);
+			HashSet<string> excludeProperties = new HashSet<string>
+			(
+				globalExcludeProperties.Split(',')
+			);
 
-			if (excludeProperties.Length > 0)
+			sb.Append("// Object Literal" + NewLine);
+
+			if (excludeProperties.Any() )
 			{
 				sb.Append("// Globally Excluded Properties:" + NewLine);
 				sb.Append("//  " + globalExcludeProperties + NewLine);
 			}
 
-			if (restrictions.Count > 0) 
+			if (restrictions.Count > 0)
 			{
 				// Comment the restricted entities
 				sb.Append("// Restricted Entities:" + NewLine);
@@ -155,9 +143,19 @@ namespace profdata.WF.Services.Handlers
 				}
 			}
 
-			sb.Append("var x = ");
-			WalkObject(obj, sb, hist, comparer, restrictions, exclude, 0);
-			sb.Append(";");
+			var rootEntity = new Entity(obj, string.Empty);
+
+			sb.Append("var ");
+			WalkObject
+			(
+				obj,
+				sb,
+				entityMap,
+				restrictions,
+				excludeProperties,
+				level: 0,
+				parent: rootEntity.UniqueName
+			);
 
 			return sb.ToString();
 		}
@@ -169,184 +167,372 @@ namespace profdata.WF.Services.Handlers
 		/// <returns></returns>
 		private static string Tabs(int count)
 		{
-			return (count == 0)
-				? string.Empty
-				: new String('\t', count);
+			return new String('\t', count);
 		}
 
 		/// <summary>
 		/// Walk a NHibernate hydrated .NET object graph, returning a C# 3.0 Object Literal
-		/// Constructor of public properties.  Parent and duplicate entity references are
-		/// restricted to prevent infinite loops
+		/// Constructor of public properties.
 		/// </summary>
 		/// <param name="obj"></param>
 		/// <param name="sb"></param>
-		/// <param name="hist"></param>
-		/// <param name="comparer"></param>
+		/// <param name="entityMap"></param>
 		/// <param name="restrictions"></param>
-		/// <param name="exclude"></param>
+		/// <param name="excludeProperties"></param>
 		/// <param name="level"></param>
+		/// <param name="parent"></param>
 		/// <returns></returns>
-		private static int WalkObject
+		private static void WalkObject
 		(
 			Object obj,
 			StringBuilder sb,
-			HashSet<Entity> hist,
-			IEqualityComparer<Entity> comparer,
+			Dictionary<Entity, Entity> entityMap,
 			Dictionary<string, HashSet<string>> restrictions,
-			HashSet<string> exclude,
-			int level
+			HashSet<string> excludeProperties,
+			int level,
+			string parent
 		)
 		{
 			if (obj == null)
 			{
-				sb.Append("Object was NULL"); // TODO:  Comment if this happens
-				System.Diagnostics.Debug.WriteLine("Encountered NULL object");
-				return level;
+				sb.Append("// NULL Object passed to WalkObject");
+				return;
 			}
 
 			var type = obj.GetType();
 			var properties = type.GetProperties();
-			var typeName = type.Name;
+			var workingTypeName = type.Name;
 
-			var entity = new Entity(obj);
+			var entity = new Entity(obj, parent);
 
 			// NHibernate uses EntityNameProxy to lazily hydrate objects
-			if (typeName.EndsWith("Proxy"))
+			// Need an improved way to strip the Proxy? from the object name
+			if (workingTypeName.EndsWith("Proxy"))
 			{
-				typeName = typeName.Substring(0, typeName.Length - "Proxy".Length);
+				workingTypeName = workingTypeName.Substring(0, workingTypeName.Length - "Proxy".Length);
 			}
+			else if ( workingTypeName.EndsWith("Proxy1") || workingTypeName.EndsWith("Proxy2"))
+			{
+				workingTypeName = workingTypeName.Substring(0, workingTypeName.Length - "Proxy1".Length);
+			}
+
 
 			// Company specific code
 			// This class can't be constructed with an Object Literal, so
 			// special case it and emit a constructor
-			if (type.BaseType.FullName.Equals("full.assembly.name.here"))
+			if (type.BaseType.FullName.Equals("place.your.assembly.name.including.base.class.or.class.here"))
 			{
+				string temp = sb.ToString();
+
 				var enumValue = type.GetProperty("Value").GetValue(obj);
 				var enumName = type.GetProperty("DisplayName").GetValue(obj);
-				sb.AppendFormat("new {0}({1},\"{2}\")", typeName, enumValue, enumName);
-				return level;
+				sb.AppendFormat("{0} = new {1}({2},\"{3}\");{4}", parent, workingTypeName, enumValue, enumName,NewLine);
+				return;
 			}
 
-	
-			if (hist.Contains(entity,comparer))
+			Entity canonicalEntity;
+			if (entityMap.TryGetValue(entity, out canonicalEntity))
 			{
-				// Duplicate Entity, emit as Key only
-				System.Diagnostics.Debug.WriteLine("Already Referenced Object " + typeName + ": " + entity.Key);
-				
+				// Entity has already been processed, such as a parent reference.  Emit at it's
+				// original definition
+
 				sb.AppendFormat
 				(
-					"new {0}{{{1}={2}}} /* Reference */", 
-					typeName, 
-					KeyProperty,
-					entity.Key
+					"{0} = {1};{2}",
+					parent,
+					canonicalEntity.Path,
+					NewLine
 				);
-				return level;
+				return;
 			}
 
-			bool isRestricted = restrictions.ContainsKey(typeName);
+			bool isRestricted = restrictions.ContainsKey(workingTypeName);
 			HashSet<string> includeProperties = (isRestricted)
-				? restrictions[typeName]
+				? restrictions[workingTypeName]
 				: null;
 
-			System.Diagnostics.Debug.WriteLine("Adding Entity " + typeName + ":"+ entity.Key);
-			hist.Add(entity);
+			bool skipEntity = (isRestricted)
+				? includeProperties.Count == 0
+				: false;
 
-			sb.AppendFormat("new {0} {{", typeName );
+			if (skipEntity) // TODO: Not Tested
+				return;
+
+			entityMap.Add(entity,entity);
+
+			// Emit Object with all base type  properties
+			sb.AppendFormat("{0} = new {1}{2}{3}{{{4}", parent, workingTypeName, NewLine, Tabs(level),NewLine);
 
 			bool appendComma = false;
 			foreach (var property in properties)
 			{
-				if (isRestricted && !includeProperties.Contains(property.Name))
-				{
-					continue;
-				}
-				if (exclude.Contains(property.Name))
+				if( SkipProperty(property,isRestricted,includeProperties,excludeProperties))
 				{
 					continue;
 				}
 
-				if (appendComma)
+				if( IsBaseType(property.PropertyType))
 				{
-					sb.Append("," + NewLine + Tabs(level));
+					if (appendComma)
+					{
+						sb.Append("," + NewLine + Tabs(level+1));
+					}
+					else
+					{
+						sb.Append(Tabs(level+1));
+						appendComma = true;
+					}
+					HandleBaseTypes(property, obj, sb, level);
 				}
-				else
+			}
+
+			sb.AppendFormat("{0}{1}}};{2}", NewLine, Tabs(level),NewLine);
+
+			// Emit all class types and lists, assiging into the parent class/path
+			foreach (var property in properties)
+			{
+				if (SkipProperty(property, isRestricted, includeProperties, excludeProperties))
 				{
-					sb.Append(NewLine + Tabs(level));
-					appendComma = true;
+					continue;
 				}
 
 				var pt = property.PropertyType;
 				var propertyName = property.Name;
 				var name = pt.Name;
-				System.Diagnostics.Debug.WriteLine("Property:{0} Type:{1}", propertyName, name);
 
-				if (HandleBaseTypes(property, obj, sb,level))
-					continue;
-
-				var interfaces = property.PropertyType.GetInterfaces();
-				var isList = interfaces.Contains(typeof(IList));
-				var isEnumerable = property.PropertyType.FullName.StartsWith("System.Collections.Generic.IEnumerable");
-				var isList1 = property.PropertyType.FullName.StartsWith("System.Collections.Generic.IList");
-				//IEnumerable enumerableTest = property.GetValue(obj, null) as IEnumerable;
-				//var isCollection = IsCollection(obj);
-				//var isClass = property.PropertyType.IsClass;
-				//var isGeneric = obj.GetType().IsGenericType;
-
-				if (isList || isList1 || isEnumerable)
+				if (!IsBaseType(property.PropertyType))
 				{
-					Object listObj = property.GetValue(obj, null);
-					var list = (IList)property.GetValue(obj, null);
-					//var collection = (ICollection)property.GetValue(obj, null);
+					var interfaces = property.PropertyType.GetInterfaces();
+					var isIList = interfaces.Contains(typeof(IList));
+					var isEnumerable = property.PropertyType.FullName.StartsWith("System.Collections.Generic.IEnumerable");
+					var isCollection = property.PropertyType.FullName.StartsWith("System.Collections.Generic.IList");
 
-					var listTypeName = property.PropertyType.GetGenericArguments()[0].Name;
-
-					if (list != null && list.Count > 0)
+					if (isIList || isCollection || isEnumerable)
 					{
-						sb.AppendFormat
-						(
-							"{0} = new List<{1}>{2}{3}{{{4}{5}", 
-							property.Name, 
-							listTypeName, 
-							NewLine, 
-							Tabs(level),
-							NewLine,
-							Tabs(level + 1)
-						);
-						WalkList(list, sb,hist, comparer, restrictions, exclude, level+1);
-						sb.Append( NewLine + Tabs(level) + "}" );
+						var list = (IList)property.GetValue(obj, null);
+
+						if (property.PropertyType.IsArray ) // aka typeof(System.Array)
+						{
+							var listTypeName = property.PropertyType.Name; // includes []
+							var listItemType = property.PropertyType.GetElementType();
+
+							var parentPath = ParentPath(parent, property.Name);
+							string listParent = string.Format("{0} = new {1}", parentPath, listTypeName);
+
+							if( list.Count == 0 )
+							{
+								sb.AppendLine(listParent + " {};");
+							}
+							else
+							{
+								WalkList(list, listItemType, sb, entityMap, restrictions, excludeProperties, level + 1, parentPath, listParent);
+							}
+						}
+						else if (list != null && list.Count > 0)
+						{
+							// List<T> and Collection<T> can be quite complex.  T could be a Nullable<T>
+							// or a Dictionary<T,T>.  Currently this code handles only simple types
+							// not nullables
+
+							bool isGeneric = property.PropertyType.IsGenericType;
+							bool isGenericTypeDefinition = property.PropertyType.IsGenericTypeDefinition;
+							bool isGenericType = property.PropertyType.IsGenericType;
+
+							var genericArgumentList = property.PropertyType.GetGenericArguments();
+							if( genericArgumentList.Length == 0 )
+							{
+								throw new Exception("Cannot process list "+ property.Name);
+							}
+
+							var firstGenericType = genericArgumentList[0];
+							var listItemType = firstGenericType.UnderlyingSystemType;
+							var listTypeName = firstGenericType.Name;
+
+							var parentPath = ParentPath(parent, property.Name);
+							string listParent = string.Format("{0} = new List<{1}>", parentPath, listTypeName);
+							WalkList(list, listItemType, sb, entityMap, restrictions, excludeProperties, level + 1, parentPath, listParent);
+						}
+						else
+						{
+							var listTypeName = property.PropertyType.GetGenericArguments()[0].Name;
+							sb.AppendFormat
+							(
+								"{0}.{1} = new List<{2}>();{3}",
+								parent,
+								property.Name,
+								listTypeName,
+								NewLine
+							);
+						}
 					}
 					else
 					{
-						sb.AppendFormat
+						// Recurse into class
+						WalkObject
 						(
-							"{0} = new List<{1}>()",
-							property.Name,
-							listTypeName
+							property.GetValue(obj),
+							sb,
+							entityMap,
+							restrictions,
+							excludeProperties,
+							level + 1,
+							ParentPath( parent, propertyName)
 						);
 					}
 				}
-				else if (property.PropertyType.IsEnum)
+			}
+		}// WalkObject
+
+		private static string ParentPath( string parent, string propertyName )
+		{
+			return (parent.Length == 0)
+				? propertyName
+				: parent + "." + propertyName ;
+		}
+
+		private static bool SkipProperty( PropertyInfo property, bool isRestricted, HashSet<string> includeProperties, HashSet<string> exclude)
+		{
+			if (isRestricted && !includeProperties.Contains(property.Name))
+			{
+				return true;
+			}
+			if (exclude.Contains(property.Name))
+			{
+				return true;
+			}
+
+			return false;
+		}
+
+		// System types handled as primitives
+		private static HashSet<System.Type> baseTypes = new HashSet<System.Type>
+		(
+			new System.Type[]
+			{
+				typeof(String),
+				typeof(Int16), typeof(Int32), typeof(Int64),
+				typeof(Single), typeof(Double),
+				typeof(Decimal),
+				typeof(Boolean),
+				typeof(DateTime),
+				typeof(byte[])
+			}
+		);
+
+
+		private static bool IsBaseType( System.Type propertyType )
+		{
+			if (baseTypes.Contains(propertyType))
+			{
+				return true;
+			}
+
+			if (propertyType.IsEnum)
+			{
+				return true;
+			}
+
+			var name = propertyType.Name;
+			var isNullable = propertyType.IsGenericType &&
+				propertyType.GetGenericTypeDefinition() == typeof(Nullable<>);
+			if (isNullable)
+			{
+				var underlyingSystemType = propertyType.GetGenericArguments()[0].UnderlyingSystemType;
+
+				if( baseTypes.Contains(underlyingSystemType))
+					return true;
+
+				name = propertyType.GetGenericArguments()[0].Name;
+			}
+			return false;
+		}
+
+		private static string FormatType( object obj )
+		{
+			var type = obj.GetType();
+
+			if( type == typeof(Int16) || type == typeof(Int32))
+			{
+				return obj.ToString();
+			}
+			
+			if( type == typeof(Int64))
+			{
+				return obj.ToString()+"L";
+			}
+
+			if( type == typeof(String))
+			{
+				return '"' + Convert.ToString(obj)
+					.Replace(@"\", @"\\")
+					.Replace("\"", "\\\"")
+					.Replace("\r", "\\r")
+					.Replace("\n", "\\n")
+					+ '"' ;
+			}
+
+			if( type == typeof(Single) )
+			{
+				return obj.ToString()+"F";
+			}
+
+			if( type == typeof(Double))
+			{
+				return obj.ToString() + "D";
+			}
+
+			if( type == typeof(Decimal))
+			{
+				return obj.ToString() + "m";
+			}
+
+			if( type == typeof(Boolean))
+			{
+				bool boolWork = false;
+				try
 				{
-					sb.AppendFormat("{0}{1} = {2}", Tabs(level), property.Name, property.GetValue(obj));
+					boolWork = Convert.ToBoolean(obj);
+				}
+				catch (Exception)
+				{
+					boolWork = false;
+				}
+				return (boolWork) ? "true" : "false";
+			}
+
+			if( type == typeof(DateTime))
+			{
+				DateTime workDate = Convert.ToDateTime(obj);
+				if (workDate.Hour == 0 && workDate.Minute == 0 && workDate.Second == 0)
+				{
+					return String.Format
+					(
+						"new DateTime({0},{1},{2})",
+						workDate.Year,
+						workDate.Month,
+						workDate.Day
+					);
 				}
 				else
 				{
-					sb.AppendFormat("{0} = ", propertyName);
-					WalkObject(property.GetValue(obj), sb, hist,comparer, restrictions, exclude, level+1 );
+					return String.Format
+					(
+						"new DateTime({0},{1},{2},{3},{4},{5})",
+						workDate.Year,
+						workDate.Month,
+						workDate.Day,
+						workDate.Hour,
+						workDate.Minute,
+						workDate.Second
+					);
 				}
 			}
 
-			sb.Append(NewLine + Tabs(level) + "}" );
-
-			return level;
-		}// WalkObject
+			return obj.ToString();
+		}
 
 		private static bool HandleBaseTypes(PropertyInfo property, Object obj, StringBuilder sb, int level)
 		{
-			DateTime workDt;
-			string workStr;
-			bool boolWork = false;
 			var pt = property.PropertyType;
 			var name = pt.Name;
 			var value = property.GetValue(obj);
@@ -364,16 +550,16 @@ namespace profdata.WF.Services.Handlers
 
 			if (pt == typeof (byte[]))
 			{
-				var stringBuilder = new StringBuilder();
 				var ba = (byte[]) value;
-				foreach (var by in ba)
-				{
-					if (stringBuilder.Length > 0)
-						stringBuilder.Append(",");
-					stringBuilder.Append(by.ToString(CultureInfo.InvariantCulture));
-				}
+				var s = String.Join(",", ba.Select(b => b.ToString() ));
 
-				sb.AppendFormat("{0} = new byte[]{{{1}}}", property.Name, stringBuilder.ToString());
+				sb.AppendFormat("{0} = new byte[]{{{1}}}", property.Name, s);
+				return true;
+			}
+
+			if (pt.IsEnum)
+			{
+				sb.AppendFormat("{0} = {1}.{2}", property.Name, pt.Name, property.GetValue(obj));
 				return true;
 			}
 
@@ -381,105 +567,112 @@ namespace profdata.WF.Services.Handlers
 			{
 				case "Int16":
 				case "Int32":
-					sb.AppendFormat("{0} = {1}", property.Name, value);
-					return true;
-
 				case "Int64":
-					sb.AppendFormat("{0} = {1}L", property.Name, value);
-					return true;
-
-				case "Float":
-					sb.AppendFormat("{0} = {1}F", property.Name, value);
-					return true;
-
+				case "Single":
 				case "Double":
-					sb.AppendFormat("{0} = {1}D", property.Name, value);
-					return true;
-
-				case "Decimal":
-					sb.AppendFormat("{0} = {1}m", property.Name, value);
-					return true;
-
 				case "Boolean":
-					try
-					{
-						boolWork = Convert.ToBoolean(value);
-					}
-					catch (Exception)
-					{
-						boolWork = false;
-					}
-					sb.AppendFormat("{0} = {1}", property.Name, (boolWork) ? "true" : "false");
-					return true;
-
 				case "DateTime":
-					workDt = Convert.ToDateTime(value);
-					if (workDt.Hour == 0 && workDt.Minute == 0 && workDt.Second == 0)
-					{
-						sb.AppendFormat
-						(
-							"{0} = new DateTime({1},{2},{3})",
-							property.Name,
-							workDt.Year,
-							workDt.Month,
-							workDt.Day
-						);
-					}
-					else
-					{
-						sb.AppendFormat
-						(
-							"{0} = new DateTime({1},{2},{3},{4},{5},{6})",
-							property.Name,
-							workDt.Year,
-							workDt.Month,
-							workDt.Day,
-							workDt.Hour,
-							workDt.Minute,
-							workDt.Second
-						);
-					}
+				case "String":
+					sb.AppendFormat("{0} = {1}", property.Name, FormatType(value));
 					return true;
 
-				case "String":
-					// TODO: Just prefix string with @?
-					workStr = Convert.ToString(value).Replace(@"\", @"\\");
-					sb.AppendFormat("{0} = \"{1}\"", property.Name, workStr);
-					return true;
+				// Byte, SByte, Char, TimeSpan ?
 			}
 
 			return false;
 		} // HandleBaseTypes
 
-#if false
-		private static bool IsCollection(object obj)
-		{
-			return typeof(ICollection).IsAssignableFrom(obj.GetType())
-				|| typeof(ICollection<>).IsAssignableFrom(obj.GetType());
-		}
-#endif
+
 
 		private static void WalkList
 		(
 			IList list,
+			Type listItemType,
 			StringBuilder sb,
-			HashSet<Entity> hist,
-			IEqualityComparer<Entity> comparer,
+			Dictionary<Entity, Entity> entityMap,
 			Dictionary<string, HashSet<string>> restrictions,
 			HashSet<string> exclude,
-			int level
+			int level,
+			string parent,
+			string listParent
 		)
 		{
-			bool appendComma = false;
+			bool appendComma = false ;
+
+			ListType processType = ListType.Unknown;
+			if (IsBaseType(listItemType))
+			{
+				processType = ListType.Intrinsic;
+				sb.Append(listParent + " {");
+			}
+			else
+			{
+				processType = ListType.Class;
+			}
+
+			var listEntities = new List<Entity>();
 			foreach (object obj in list)
 			{
-				if (appendComma)
+				if( processType == ListType.Intrinsic)
 				{
-					sb.Append("," + NewLine + Tabs(level));
+					if (appendComma)
+					{
+						sb.Append(",");
+					}
+					appendComma = true;
+					sb.AppendFormat("{0}", FormatType(obj));
 				}
-				appendComma = true;
-				WalkObject(obj, sb, hist, comparer, restrictions, exclude, level);
+				else if ( processType == ListType.Class)
+				{
+					// Lookup to see if this entity has ref'ed
+					var listEntity = new Entity(obj, string.Empty);
+
+					Entity canonicalEntity;
+					if (entityMap.TryGetValue(listEntity, out canonicalEntity))
+					{
+						listEntities.Add(canonicalEntity);
+					}
+					else
+					{
+						listEntities.Add(listEntity);
+						sb.AppendFormat("{0}var ", Tabs(level));
+						WalkObject
+						(
+							obj,
+							sb,
+							entityMap,
+							restrictions,
+							exclude,
+							level,
+							parent: listEntity.UniqueName
+						);
+					}
+				}
 			}
+
+
+			if( processType == ListType.Intrinsic)
+			{
+				sb.AppendLine("};");
+			}
+			else if ( processType == ListType.Class)
+			{
+				appendComma = false;
+				sb.Append(listParent + " {");
+				foreach (var listEntity in listEntities)
+				{
+					if (appendComma)
+					{
+						sb.Append(",");
+					}
+					appendComma = true;
+
+					sb.Append(listEntity.Path);
+				}
+				sb.Append("};" + NewLine);
+			}
+
 		}// WalkList
 	}// class ObjectToObjectLiteral
 }
+ 
